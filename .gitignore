@@ -1,0 +1,7 @@
+.scratch
+.env
+.dev.vars
+node_modules
+.wrangler
+dist
+__pycache__

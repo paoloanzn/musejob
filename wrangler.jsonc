@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "codemarkets-jobs",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "job.code.markets", "custom_domain": true }],
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "codemarkets-jobs",
+      "database_id": "ca95c96b-cf2a-4b42-b04b-609dbf2ce468",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": { "crons": ["*/10 * * * *"] },
+  // Rate limiter windows can only be 10 or 60 seconds.
+  "ratelimits": [
+    { "name": "HIRE_LIMITER", "namespace_id": "4101", "simple": { "limit": 3, "period": 60 } },
+    { "name": "KEY_LIMITER", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } },
+    { "name": "PUBLIC_LIMITER", "namespace_id": "4103", "simple": { "limit": 120, "period": 60 } }
+  ],
+  "observability": { "enabled": true },
+  // Business rules. Money is integer cents, durations are milliseconds.
+  // Secrets (set with `wrangler secret put`): GITHUB_TOKEN, IP_HASH_SALT.
+  "vars": {
+    "PUBLIC_URL": "https://job.code.markets",
+    "UNVERIFIED_REWARD_LIMIT_CENTS": 500,
+    "DAILY_PAYOUT_CAP_CENTS": 20000,
+    "DEFAULT_CLAIM_TTL_MS": 86400000,
+    "MESSAGES_PER_HOUR": 10,
+    "HIRES_PER_IP_PER_DAY": 5,
+    "MIN_PACK_VERSIONS": {
+      "evm-wallet": "1.0.0",
+      "codemarkets-jobs": "1.0.0",
+      "codemarkets-master": "1.0.0"
+    },
+    "USDC_ADDRESS": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "BASE_MIN_CONFIRMATIONS": 3,
+    "BASE_RPC_URLS": [
+      "https://mainnet.base.org",
+      "https://base-rpc.publicnode.com",
+      "https://developer-access-mainnet.base.org",
+      "https://1rpc.io/base"
+    ],
+    "ACCESS_TEAM_DOMAIN": "gladium-ai.cloudflareaccess.com",
+    "ACCESS_AUD": "2bd7ea956a9d99e0d9993ce52833667aa88b11f36ea3ca43140b6fb54dabed1b"
+  }
+}

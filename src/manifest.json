@@ -1,0 +1,11 @@
+{
+  "agents_md_version": "1.0.0",
+  "packs": {
+    "codemarkets-jobs": {
+      "1.0.0": "e069273ea4d64769c1e99cffc361ca2a5bae5d604de0a590dd65fb74c76f86b7"
+    },
+    "evm-wallet": {
+      "1.0.0": "f19eec515d4b36eeee0712c00df0bf401a72b0d749f4e9b0d4a2ddead4fad93e"
+    }
+  }
+}
