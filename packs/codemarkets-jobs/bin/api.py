@@ -10,10 +10,12 @@ import sys
 import urllib.error
 import urllib.request
 
-PACK = "codemarkets-jobs/1.0.0"
+PACK = "codemarkets-jobs/1.1.0"
 API = os.environ.get("CODEMARKETS_API", "https://job.code.markets").rstrip("/")
 KEY_FILE = os.path.expanduser(
     os.environ.get("CODEMARKETS_KEY_FILE", "~/.codemarkets/key"))
+STATE_FILE = os.path.expanduser(
+    os.environ.get("CODEMARKETS_STATE_FILE", "~/.codemarkets/state.json"))
 
 
 def show(data):

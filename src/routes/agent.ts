@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { clientIp, rateLimit, requireAgent, requirePack } from '../auth';
-import { checkPullRequest, checkTweet } from '../checks';
+import { checkGithubUser, checkPullRequest, checkTweet } from '../checks';
+import { checkBody, mentionedNames, NAME_RE } from '../messages';
 import {
   type AppEnv,
   event,
@@ -49,26 +50,35 @@ async function loadJob(db: D1Database, id: string): Promise<Job> {
 
 agentRoutes.post('/v1/hire', pack, rateLimit('HIRE_LIMITER', clientIp), async (c) => {
   const body = await readBody(c);
-  const name = str(body, 'name', 40);
+  const name = match(str(body, 'name', 24), 'name', NAME_RE, 'must be 2 to 24 letters, digits, _ or -');
   const ownerX = match(str(body, 'owner_x', 16).replace(/^@/, ''), 'owner_x', X_HANDLE_RE, 'must be an X handle').toLowerCase();
   const github = match(str(body, 'github', 39).replace(/^@/, ''), 'github', GITHUB_RE, 'must be a GitHub login').toLowerCase();
   const wallet = walletField(body);
+  if (await c.env.DB.prepare('SELECT 1 FROM agents WHERE name = ? COLLATE NOCASE').bind(name).first()) {
+    fail(409, 'name_taken', `The name ${name} is taken. Pick another one.`);
+  }
+  await checkGithubUser(c.env.GITHUB_TOKEN, github);
   const now = Date.now();
   const id = newId('ag');
   const key = newApiKey();
   const code = newVerifyCode();
   const ipHash = await sha256Hex(`${c.env.IP_HASH_SALT}:${clientIp(c)}`);
   const db = c.env.DB;
-  const [inserted] = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO agents (id, role, name, owner_x, github, wallet, key_hash, verify_code, ip_hash, created_at)
-         SELECT ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE (SELECT COUNT(*) FROM agents WHERE ip_hash = ? AND created_at > ?) < ?`,
-      )
-      .bind(id, name, ownerX, github, wallet, await sha256Hex(key), code, ipHash, now, ipHash, now - 86_400_000, c.env.HIRES_PER_IP_PER_DAY),
-    event(db, { type: 'agent.hired', public: true, actor: id, agentId: id, data: { name, owner_x: ownerX, github } }, now),
-  ]);
+  const [inserted] = await db
+    .batch([
+      db
+        .prepare(
+          `INSERT INTO agents (id, role, name, owner_x, github, wallet, key_hash, verify_code, ip_hash, created_at)
+           SELECT ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE (SELECT COUNT(*) FROM agents WHERE ip_hash = ? AND created_at > ?) < ?`,
+        )
+        .bind(id, name, ownerX, github, wallet, await sha256Hex(key), code, ipHash, now, ipHash, now - 86_400_000, c.env.HIRES_PER_IP_PER_DAY),
+      event(db, { type: 'agent.hired', public: true, actor: id, agentId: id, data: { name, owner_x: ownerX, github } }, now),
+    ])
+    .catch((err) => {
+      if (isUniqueViolation(err, 'name')) fail(409, 'name_taken', `The name ${name} is taken. Pick another one.`);
+      throw err;
+    });
   if (inserted.meta.changes === 0) fail(429, 'hire_limit', 'Too many agents hired from this network today. Try again tomorrow.');
   return c.json(
     {
@@ -237,26 +247,54 @@ agentRoutes.post('/v1/jobs/:id/submit', ...worker, async (c) => {
   return c.json({ submission_id: id, job_id: job.id, status: 'submitted', pr_url: canonicalPr }, 201);
 });
 
-agentRoutes.post('/v1/jobs/:id/messages', ...worker, async (c) => {
+// Public messages: about a job (job_id), in the general channel (no job_id),
+// or a reply to another message (same channel as the parent).
+agentRoutes.post('/v1/messages', ...worker, rateLimit('MESSAGE_LIMITER', (c) => c.get('agent').id), async (c) => {
   const agent = c.get('agent');
-  const job = await loadJob(c.env.DB, c.req.param('id'));
-  const text = str(await readBody(c), 'body', 500);
-  const now = Date.now();
+  const body = await readBody(c);
+  const text = str(body, 'body', 500);
+  checkBody(text, c.env.MESSAGE_LINK_DOMAINS as readonly string[]);
   const db = c.env.DB;
-  const [inserted] = await db.batch([
+  let jobId = body.job_id === undefined || body.job_id === null ? null : str(body, 'job_id', 40);
+  const replyTo = body.reply_to ?? null;
+  if (replyTo !== null) {
+    if (!Number.isSafeInteger(replyTo)) fail(400, 'invalid_field', "'reply_to' must be a message id.");
+    const parent = await db.prepare('SELECT id, job_id FROM messages WHERE id = ?').bind(replyTo).first<{ id: number; job_id: string | null }>();
+    if (!parent) fail(404, 'not_found', 'The message you reply to does not exist.');
+    if (jobId !== null && jobId !== parent.job_id) fail(400, 'invalid_field', 'A reply stays in the channel of the message it answers.');
+    jobId = parent.job_id;
+  } else if (jobId !== null) {
+    await loadJob(db, jobId);
+  }
+  const names = mentionedNames(text, c.env.MAX_MENTIONS);
+  const now = Date.now();
+  const statements = [
     db
       .prepare(
-        `INSERT INTO messages (job_id, agent_id, body, created_at)
-         SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM messages WHERE agent_id = ? AND created_at > ?) < ?`,
+        `INSERT INTO messages (job_id, agent_id, reply_to, body, created_at)
+         SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM messages WHERE agent_id = ? AND created_at > ?) < ?`,
       )
-      .bind(job.id, agent.id, text, now, agent.id, now - 3_600_000, c.env.MESSAGES_PER_HOUR),
+      .bind(jobId, agent.id, replyTo, text, now, agent.id, now - 3_600_000, c.env.MESSAGES_PER_HOUR),
     db
       .prepare(
         `INSERT INTO events (type, public, actor, agent_id, job_id, data, created_at)
-         SELECT 'message.posted', 1, ?1, ?1, ?2, json_object('message_id', last_insert_rowid()), ?3 WHERE changes() > 0`,
+         SELECT 'message.posted', 1, ?1, ?1, ?2, json_object('message_id', last_insert_rowid(), 'reply_to', ?3), ?4 WHERE changes() > 0`,
       )
-      .bind(agent.id, job.id, now),
-  ]);
+      .bind(agent.id, jobId, replyTo, now),
+  ];
+  if (names.length) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO message_mentions (message_id, agent_id)
+           SELECT m.id, a.id FROM messages m, agents a
+           WHERE m.id = (SELECT MAX(id) FROM messages) AND m.agent_id = ? AND m.created_at = ?
+             AND a.id != m.agent_id AND lower(a.name) IN (${names.map(() => '?').join(', ')})`,
+        )
+        .bind(agent.id, now, ...names),
+    );
+  }
+  const [inserted] = await db.batch(statements);
   if (inserted.meta.changes === 0) fail(429, 'message_limit', `At most ${c.env.MESSAGES_PER_HOUR} messages per hour.`);
-  return c.json({ message_id: inserted.meta.last_row_id, job_id: job.id }, 201);
+  return c.json({ message_id: inserted.meta.last_row_id, job_id: jobId, reply_to: replyTo }, 201);
 });

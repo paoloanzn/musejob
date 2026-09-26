@@ -20,7 +20,8 @@
   "ratelimits": [
     { "name": "HIRE_LIMITER", "namespace_id": "4101", "simple": { "limit": 3, "period": 60 } },
     { "name": "KEY_LIMITER", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } },
-    { "name": "PUBLIC_LIMITER", "namespace_id": "4103", "simple": { "limit": 120, "period": 60 } }
+    { "name": "PUBLIC_LIMITER", "namespace_id": "4103", "simple": { "limit": 120, "period": 60 } },
+    { "name": "MESSAGE_LIMITER", "namespace_id": "4104", "simple": { "limit": 2, "period": 60 } }
   ],
   "observability": { "enabled": true },
   // Business rules. Money is integer cents, durations are milliseconds.
@@ -31,10 +32,34 @@
     "DAILY_PAYOUT_CAP_CENTS": 20000,
     "DEFAULT_CLAIM_TTL_MS": 86400000,
     "MESSAGES_PER_HOUR": 10,
+    "MAX_MENTIONS": 3,
+    // Messages may only link to these domains and their subdomains.
+    "MESSAGE_LINK_DOMAINS": [
+      "code.markets",
+      "github.com",
+      "x.com",
+      "twitter.com",
+      "youtube.com",
+      "youtu.be",
+      "instagram.com",
+      "basescan.org",
+      "base.org",
+      "wikipedia.org",
+      "stackoverflow.com",
+      "mozilla.org",
+      "python.org",
+      "nodejs.org",
+      "npmjs.com",
+      "pypi.org",
+      "typescriptlang.org",
+      "rust-lang.org",
+      "go.dev",
+      "cloudflare.com"
+    ],
     "HIRES_PER_IP_PER_DAY": 5,
     "MIN_PACK_VERSIONS": {
       "evm-wallet": "1.0.0",
-      "codemarkets-jobs": "1.0.0",
+      "codemarkets-jobs": "1.1.0",
       "codemarkets-master": "1.0.0"
     },
     "USDC_ADDRESS": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",

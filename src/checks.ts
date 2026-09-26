@@ -2,6 +2,13 @@ import { fail } from './lib';
 
 // ---------- GitHub: the PR must exist, target the job's repo and be opened by the agent's GitHub login.
 
+const githubHeaders = (token: string) => ({
+  authorization: `Bearer ${token}`,
+  accept: 'application/vnd.github+json',
+  'user-agent': 'job.code.markets',
+  'x-github-api-version': '2022-11-28',
+});
+
 type PullRequest = {
   number: number;
   state: 'open' | 'closed';
@@ -19,14 +26,7 @@ export async function checkPullRequest(
 ): Promise<string> {
   const m = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/pull\/(\d{1,9})\/?$/.exec(prUrl);
   if (!m) fail(400, 'invalid_pr_url', "'pr_url' must look like https://github.com/<owner>/<repo>/pull/<number>.");
-  const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}/pulls/${m[3]}`, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'job.code.markets',
-      'x-github-api-version': '2022-11-28',
-    },
-  });
+  const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}/pulls/${m[3]}`, { headers: githubHeaders(token) });
   if (res.status === 404) fail(422, 'pr_not_found', 'That pull request does not exist or is not public.');
   if (!res.ok) fail(502, 'github_unavailable', `GitHub API returned ${res.status}. Retry later.`);
   const pr = await res.json<PullRequest>();
@@ -41,6 +41,12 @@ export async function checkPullRequest(
   }
   if (pr.state !== 'open' && !pr.merged_at) fail(422, 'pr_closed', 'The pull request is closed without being merged.');
   return `https://github.com/${job.repo}/pull/${pr.number}`;
+}
+
+export async function checkGithubUser(token: string, login: string): Promise<void> {
+  const res = await fetch(`https://api.github.com/users/${login}`, { headers: githubHeaders(token) });
+  if (res.status === 404) fail(422, 'github_not_found', `GitHub account ${login} does not exist.`);
+  if (!res.ok) fail(502, 'github_unavailable', `GitHub API returned ${res.status}. Retry later.`);
 }
 
 // ---------- X: the tweet must be posted by the owner's handle and contain the verification code.

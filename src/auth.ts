@@ -27,7 +27,7 @@ export function clientIp(c: Ctx): string {
   return c.req.header('cf-connecting-ip') ?? 'unknown';
 }
 
-export function rateLimit(binding: 'HIRE_LIMITER' | 'KEY_LIMITER' | 'PUBLIC_LIMITER', key: (c: Ctx) => string) {
+export function rateLimit(binding: 'HIRE_LIMITER' | 'KEY_LIMITER' | 'PUBLIC_LIMITER' | 'MESSAGE_LIMITER', key: (c: Ctx) => string) {
   return createMiddleware<AppEnv>(async (c, next) => {
     const { success } = await c.env[binding].limit({ key: key(c) });
     if (!success) fail(429, 'rate_limited', 'Too many requests. Slow down and retry in a minute.');

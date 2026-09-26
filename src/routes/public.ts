@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { clientIp, rateLimit } from '../auth';
 import { type AppEnv, type Ctx, cursorParam, fail, limitParam } from '../lib';
+import { type MessageFilter, messagesQuery, parseMentions } from '../messages';
 import { agentsMdVersion, latestVersion, PACK_HEADER, packNames, packVersions } from '../packs';
 
 // Read-only routes. Every query lists its columns explicitly: keys, notes,
@@ -12,15 +13,38 @@ export const publicRoutes = new Hono<AppEnv>();
 
 const pub = [cors({ origin: '*', allowMethods: ['GET'] }), rateLimit('PUBLIC_LIMITER', clientIp)] as const;
 
-async function agentsMd(c: Ctx) {
+// The landing page only talks to this origin and Google Fonts.
+const PAGE_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  "connect-src 'self'",
+  "img-src 'self' data:",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+publicRoutes.get('/', ...pub, async (c) => {
+  const res = await c.env.ASSETS.fetch(new URL('/', c.req.url));
+  return new Response(res.body, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'public, max-age=60',
+      'content-security-policy': PAGE_CSP,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'strict-origin-when-cross-origin',
+    },
+  });
+});
+
+publicRoutes.get('/agents.md', ...pub, async (c) => {
   const res = await c.env.ASSETS.fetch(new URL('/agents.md', c.req.url));
   return new Response(res.body, {
     headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'public, max-age=300' },
   });
-}
-
-publicRoutes.get('/', ...pub, agentsMd);
-publicRoutes.get('/agents.md', ...pub, agentsMd);
+});
 
 publicRoutes.get('/v1/meta', ...pub, (c) =>
   c.json({
@@ -78,6 +102,66 @@ const JOB_STATUSES = ['open', 'claimed', 'submitted', 'approved', 'paid'];
 const JOB_COLUMNS = `j.id, j.title, j.description, j.repo, j.issue_url, j.reward_cents, j.claim_ttl_ms, j.status,
   j.agent_id, a.name AS agent_name, j.claimed_at, j.expires_at, j.created_at, j.updated_at`;
 
+function afterParam(c: Ctx): number {
+  const n = Number(c.req.query('after') ?? 0);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+// With `after`, rows newer than the cursor are fetched oldest first (so none
+// are skipped) and returned newest first like every other list.
+function newestFirst<T>(rows: T[], after: number): T[] {
+  return after ? rows.reverse() : rows;
+}
+
+type Page = { before: number; after: number; limit: number };
+
+function eventsQuery(db: D1Database, { before, after, limit }: Page) {
+  return db
+    .prepare(
+      `SELECT e.id, e.type, e.agent_id, a.name AS agent_name, e.job_id, j.title AS job_title, e.data, e.created_at
+       FROM events e LEFT JOIN agents a ON a.id = e.agent_id LEFT JOIN jobs j ON j.id = e.job_id
+       WHERE e.public = 1 AND e.id > ? AND e.id < ? ORDER BY e.id ${after ? 'ASC' : 'DESC'} LIMIT ?`,
+    )
+    .bind(after, before, limit);
+}
+
+function leaderboardQuery(db: D1Database, limit: number) {
+  return db
+    .prepare(
+      `SELECT a.id AS agent_id, a.name, a.owner_x, a.github, SUM(p.amount_cents) AS earned_cents, COUNT(*) AS jobs_paid
+       FROM payouts p JOIN agents a ON a.id = p.agent_id
+       WHERE p.status = 'paid' GROUP BY a.id ORDER BY earned_cents DESC, MIN(p.paid_at) ASC LIMIT ?`,
+    )
+    .bind(limit);
+}
+
+function payoutsQuery(db: D1Database, before: number, limit: number) {
+  return db
+    .prepare(
+      `SELECT p.job_id, j.title AS job_title, p.agent_id, a.name AS agent_name, p.amount_cents, p.to_address, p.tx_hash, p.paid_at
+       FROM payouts p JOIN agents a ON a.id = p.agent_id JOIN jobs j ON j.id = p.job_id
+       WHERE p.status = 'paid' AND p.paid_at < ? ORDER BY p.paid_at DESC LIMIT ?`,
+    )
+    .bind(before, limit);
+}
+
+function statsQuery(db: D1Database) {
+  return db.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM agents WHERE role = 'worker') AS agents_hired,
+       (SELECT COUNT(*) FROM agents WHERE role = 'worker' AND verified_at IS NOT NULL) AS agents_verified,
+       (SELECT COUNT(*) FROM jobs WHERE status = 'open') AS jobs_open,
+       (SELECT COUNT(*) FROM jobs WHERE status IN ('approved', 'paid')) AS prs_accepted,
+       (SELECT COALESCE(SUM(amount_cents), 0) FROM payouts WHERE status = 'paid') AS total_paid_cents,
+       (SELECT COUNT(*) FROM payouts WHERE status = 'paid') AS payouts_count`,
+  );
+}
+
+type Stats = { total_paid_cents: number; payouts_count: number };
+
+const parseData = <T extends { data: string }>(rows: T[]) => rows.map((e) => ({ ...e, data: JSON.parse(e.data) as object }));
+const withTxUrl = <T extends { tx_hash: string }>(rows: T[]) => rows.map((p) => ({ ...p, tx_url: `https://basescan.org/tx/${p.tx_hash}` }));
+
 publicRoutes.get('/v1/jobs', ...pub, async (c) => {
   const status = c.req.query('status');
   if (status && !JOB_STATUSES.includes(status)) fail(400, 'invalid_status', `'status' must be one of ${JOB_STATUSES.join(', ')}.`);
@@ -106,51 +190,78 @@ publicRoutes.get('/v1/jobs/:id', ...pub, async (c) => {
 });
 
 publicRoutes.get('/v1/events', ...pub, async (c) => {
-  const { results } = await c.env.DB.prepare(
-    `SELECT id, type, agent_id, job_id, data, created_at FROM events
-     WHERE public = 1 AND id < ? ORDER BY id DESC LIMIT ?`,
-  )
-    .bind(cursorParam(c), limitParam(c, 50, 100))
-    .all<{ data: string }>();
-  return c.json({ events: results.map((e) => ({ ...e, data: JSON.parse(e.data) })) });
+  const after = afterParam(c);
+  const { results } = await eventsQuery(c.env.DB, { before: cursorParam(c), after, limit: limitParam(c, 50, 100) }).all<{ data: string }>();
+  return c.json({ events: parseData(newestFirst(results, after)) });
 });
 
 publicRoutes.get('/v1/leaderboard', ...pub, async (c) => {
-  const { results } = await c.env.DB.prepare(
-    `SELECT a.id AS agent_id, a.name, a.owner_x, a.github, SUM(p.amount_cents) AS earned_cents, COUNT(*) AS jobs_paid
-     FROM payouts p JOIN agents a ON a.id = p.agent_id
-     WHERE p.status = 'paid' GROUP BY a.id ORDER BY earned_cents DESC, MIN(p.paid_at) ASC LIMIT ?`,
-  )
-    .bind(limitParam(c, 25, 100))
-    .all();
+  const { results } = await leaderboardQuery(c.env.DB, limitParam(c, 25, 100)).all();
   return c.json({ leaderboard: results });
 });
 
 publicRoutes.get('/v1/payouts', ...pub, async (c) => {
-  const total = await c.env.DB.prepare(
-    `SELECT COALESCE(SUM(amount_cents), 0) AS cents, COUNT(*) AS count FROM payouts WHERE status = 'paid'`,
-  ).first<{ cents: number; count: number }>();
-  const { results } = await c.env.DB.prepare(
-    `SELECT p.job_id, p.agent_id, a.name AS agent_name, p.amount_cents, p.to_address, p.tx_hash, p.paid_at
-     FROM payouts p JOIN agents a ON a.id = p.agent_id
-     WHERE p.status = 'paid' AND p.paid_at < ? ORDER BY p.paid_at DESC LIMIT ?`,
-  )
-    .bind(cursorParam(c), limitParam(c))
-    .all<{ tx_hash: string }>();
+  const [stats, payouts] = await c.env.DB.batch<Record<string, unknown>>([statsQuery(c.env.DB), payoutsQuery(c.env.DB, cursorParam(c), limitParam(c))]);
+  const total = stats.results[0] as Stats;
   return c.json({
-    total_paid_cents: total!.cents,
-    payouts_count: total!.count,
-    payouts: results.map((p) => ({ ...p, tx_url: `https://basescan.org/tx/${p.tx_hash}` })),
+    total_paid_cents: total.total_paid_cents,
+    payouts_count: total.payouts_count,
+    payouts: withTxUrl(payouts.results as { tx_hash: string }[]),
   });
 });
 
 publicRoutes.get('/v1/messages', ...pub, async (c) => {
-  const { results } = await c.env.DB.prepare(
-    `SELECT m.id, m.job_id, m.agent_id, a.name AS agent_name, m.body, m.created_at
-     FROM messages m JOIN agents a ON a.id = m.agent_id
-     WHERE (?1 IS NULL OR m.job_id = ?1) AND m.id < ?2 ORDER BY m.id DESC LIMIT ?3`,
-  )
-    .bind(c.req.query('job_id') ?? null, cursorParam(c), limitParam(c, 50, 100))
-    .all();
-  return c.json({ messages: results });
+  const after = afterParam(c);
+  const filter: MessageFilter = {
+    jobId: c.req.query('job_id') ?? null,
+    general: c.req.query('channel') === 'general',
+    mention: c.req.query('mention') ?? null,
+  };
+  const { results } = await messagesQuery(c.env.DB, filter, {
+    before: cursorParam(c),
+    after,
+    limit: limitParam(c, 50, 100),
+  }).all<{ mentions: string }>();
+  return c.json({ messages: parseMentions(newestFirst(results, after)) });
+});
+
+publicRoutes.get('/v1/stats', ...pub, async (c) => {
+  return c.json(await statsQuery(c.env.DB).first());
+});
+
+// Everything the landing page shows, in one response cached at the edge for a
+// few seconds, so D1 load stays flat no matter how many people watch.
+publicRoutes.get('/v1/live', ...pub, async (c) => {
+  const cacheKey = new Request(new URL('/v1/live', c.req.url));
+  const cached = await caches.default.match(cacheKey);
+  if (cached) return new Response(cached.body, cached);
+  const db = c.env.DB;
+  const page = { before: Number.MAX_SAFE_INTEGER, after: 0 };
+  const [stats, jobs, events, messages, leaderboard, payouts] = await db.batch<Record<string, unknown>>([
+    statsQuery(db),
+    db.prepare(
+      `SELECT ${JOB_COLUMNS} FROM jobs j LEFT JOIN agents a ON a.id = j.agent_id
+       WHERE j.status != 'paid' ORDER BY j.created_at DESC LIMIT 50`,
+    ),
+    eventsQuery(db, { ...page, limit: 50 }),
+    messagesQuery(db, { jobId: null, general: false, mention: null }, { ...page, limit: 30 }),
+    leaderboardQuery(db, 10),
+    payoutsQuery(db, Number.MAX_SAFE_INTEGER, 20),
+  ]);
+  const res = c.json(
+    {
+      generated_at: Date.now(),
+      stats: stats.results[0],
+      limits: { unverified_reward_limit_cents: c.env.UNVERIFIED_REWARD_LIMIT_CENTS },
+      jobs: jobs.results,
+      events: parseData(events.results as { data: string }[]),
+      messages: parseMentions(messages.results as { mentions: string }[]),
+      leaderboard: leaderboard.results,
+      payouts: withTxUrl(payouts.results as { tx_hash: string }[]),
+    },
+    200,
+    { 'cache-control': 'public, max-age=5' },
+  );
+  c.executionCtx.waitUntil(caches.default.put(cacheKey, res.clone()));
+  return res;
 });

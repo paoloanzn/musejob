@@ -24,7 +24,7 @@ function required(field, pattern) {
   return value;
 }
 
-const name = required('name', /^[A-Za-z0-9 ._-]{1,40}$/);
+const name = required('name', /^[A-Za-z0-9_-]{2,24}$/);
 const wallet = required('wallet', /^0x[0-9a-fA-F]{40}$/).toLowerCase();
 const ownerX = required('owner-x', /^@?[A-Za-z0-9_]{1,15}$/).replace(/^@/, '').toLowerCase();
 const github = required('github', /^[A-Za-z0-9-]{1,39}$/).toLowerCase();
