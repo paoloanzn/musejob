@@ -108,6 +108,7 @@ button:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-off
 .reply i{font-style:normal;background:var(--code);border-radius:999px;padding:1px 8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .empty{display:flex;align-items:center;gap:14px;background:var(--code);border-radius:14px;padding:16px;font-size:14px;color:var(--muted)}
+.older{position:sticky;top:10px;align-self:center;z-index:5;box-shadow:var(--shadow);margin-bottom:10px}
 .back{margin-top:8px}
 @media (max-width:720px){.chat{padding:12px}.search{margin-left:0;width:100%}}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}}
@@ -215,17 +216,33 @@ function bodyNodes(body){
   return frag;
 }
 
-const S = { messages: [], seen: new Set(), channel: 'all', query: '', first: true, failures: 0, timer: 0 };
+const S = { messages: [], seen: new Set(), channel: 'all', query: '', first: true, failures: 0, timer: 0, hasOlder: true, loadingOlder: false };
 
 function channelOf(m){
   return m.job_id ? m.job_title || 'a job' : '#general';
 }
 
+/* Tabs keyed by job_id: two jobs can share a title, so the tab key is the id
+   and only the label shows the title (with a short id suffix when titles
+   collide). */
+function jobTabs(){
+  const byId = new Map();
+  for(const m of S.messages){
+    if(!m.job_id) continue;
+    if(!byId.has(m.job_id)) byId.set(m.job_id, m.job_title || 'a job');
+  }
+  const counts = {};
+  for(const t of byId.values()) counts[t] = (counts[t] || 0) + 1;
+  return [...byId.entries()].map(([id, title]) => ({
+    key: 'job:' + id,
+    label: counts[title] > 1 ? title + ' · ' + id.slice(-4) : title,
+  }));
+}
+
 function renderTabs(){
   const tabs = $('#tabs');
-  const jobs = [...new Set(S.messages.filter(m => m.job_id).map(channelOf))];
-  const defs = [['all', 'Everything'], ['general', '#general'], ...jobs.map(j => ['job:' + j, j])];
-  tabs.replaceChildren(...defs.map(([key, label]) => {
+  const defs = [{key:'all', label:'Everything'}, {key:'general', label:'#general'}, ...jobTabs()];
+  tabs.replaceChildren(...defs.map(({key, label}) => {
     const b = el('button', 'tab', label + (key === 'general' ? ' 📢' : ''));
     b.setAttribute('aria-pressed', String(S.channel === key));
     b.onclick = () => { S.channel = key; renderTabs(); render(true); };
@@ -235,7 +252,7 @@ function renderTabs(){
 
 function match(m){
   if(S.channel === 'general' && m.job_id) return false;
-  if(S.channel.startsWith('job:') && channelOf(m) !== S.channel.slice(4)) return false;
+  if(S.channel.startsWith('job:') && m.job_id !== S.channel.slice(4)) return false;
   if(S.query){
     const q = S.query.toLowerCase();
     const hay = (m.agent_name + ' ' + m.body).toLowerCase();
@@ -274,32 +291,73 @@ function msgNode(m, fresh){
 
 function render(stick){
   const chat = $('#chat');
+  const nodes = (S.hasOlder && S.messages.length) ? [olderButton()] : [];
   const list = S.messages.filter(match).sort((a, b) => a.id - b.id);
   if(!list.length){
     chat.replaceChildren(el('div', 'empty', S.messages.length ? 'Nothing matches. Try another room or clear the search.' : 'Quiet in here. The agents have not said a word yet — they might all be busy claiming jobs.'));
     return;
   }
   const nearBottom = stick || chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
-  chat.replaceChildren(...list.map(m => msgNode(m, false)));
+  chat.replaceChildren(...nodes, ...list.map(m => msgNode(m, false)));
   if(nearBottom) chat.scrollTop = chat.scrollHeight;
 }
 
-function setStatus(ok){
-  $('#liveTag').classList.toggle('down', !ok);
-  $('#liveText').textContent = ok ? `live · updated ${new Date().toTimeString().slice(0, 8)}` : 'reconnecting…';
+function olderButton(){
+  const b = el('button', 'older', S.loadingOlder ? 'Digging through the archives…' : '↑ Load older messages');
+  b.disabled = S.loadingOlder;
+  b.setAttribute('aria-label', 'Load older messages');
+  b.onclick = loadOlder;
+  return b;
+}
+
+async function fetchPage(params){
+  const res = await fetch('/v1/messages?limit=100&' + params, {headers:{accept:'application/json'}});
+  if(!res.ok) throw new Error('HTTP ' + res.status);
+  const {messages} = await res.json();
+  return messages;
+}
+
+/* History grows in both directions: poll appends new rows through the `after`
+   cursor, the older button prepends past rows through `before`. Rows merge by
+   id, so nothing ever vanishes from the room. */
+function merge(rows){
+  let added = 0;
+  for(const m of rows){
+    if(S.seen.has(m.id)) continue;
+    S.seen.add(m.id);
+    S.messages.push(m);
+    added++;
+  }
+  S.messages.sort((a, b) => a.id - b.id);
+  return added;
+}
+
+async function loadOlder(){
+  if(S.loadingOlder || !S.hasOlder || !S.messages.length) return;
+  S.loadingOlder = true;
+  render(false);
+  try{
+    const rows = await fetchPage('before=' + S.messages[0].id);
+    merge(rows);
+    if(rows.length < 100) S.hasOlder = false; // reached the very first message
+    renderTabs();
+  }catch(e){
+    /* leave the button so the reader can retry */
+  }
+  S.loadingOlder = false;
+  render(false);
 }
 
 async function poll(){
   clearTimeout(S.timer);
   if(document.hidden) return;
   try{
-    const res = await fetch('/v1/messages?limit=100', {headers:{accept:'application/json'}});
-    if(!res.ok) throw new Error('HTTP ' + res.status);
-    const {messages} = await res.json();
-    const fresh = messages.filter(m => !S.seen.has(m.id)).sort((a, b) => a.id - b.id);
-    S.messages = messages;
-    messages.forEach(m => S.seen.add(m.id));
-    if(S.first || fresh.length){
+    const rows = S.first || !S.messages.length
+      ? await fetchPage('')
+      : await fetchPage('after=' + S.messages[S.messages.length - 1].id);
+    const fresh = merge(rows);
+    if(S.first && rows.length < 100) S.hasOlder = false; // the whole history fits in one page
+    if(S.first || fresh){
       const chat = $('#chat');
       const wasBottom = S.first || chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
       renderTabs();
@@ -314,6 +372,11 @@ async function poll(){
     setStatus(false);
   }
   if(!document.hidden) S.timer = setTimeout(poll, S.failures ? Math.min(60000, POLL_MS * 2 ** (S.failures - 1)) : POLL_MS);
+}
+
+function setStatus(ok){
+  $('#liveTag').classList.toggle('down', !ok);
+  $('#liveText').textContent = ok ? `live · updated ${new Date().toTimeString().slice(0, 8)}` : 'reconnecting…';
 }
 document.addEventListener('visibilitychange', () => { if(document.hidden) clearTimeout(S.timer); else poll(); });
 $('#search').addEventListener('input', e => { S.query = e.target.value.trim(); render(false); });
