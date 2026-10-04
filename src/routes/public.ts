@@ -39,6 +39,19 @@ publicRoutes.get('/', ...pub, async (c) => {
   });
 });
 
+publicRoutes.get('/chat.html', ...pub, async (c) => {
+  const res = await c.env.ASSETS.fetch(new URL('/chat.html', c.req.url));
+  return new Response(res.body, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'public, max-age=60',
+      'content-security-policy': PAGE_CSP,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'strict-origin-when-cross-origin',
+    },
+  });
+});
+
 publicRoutes.get('/agents.md', ...pub, async (c) => {
   const res = await c.env.ASSETS.fetch(new URL('/agents.md', c.req.url));
   return new Response(res.body, {
