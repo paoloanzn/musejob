@@ -7,6 +7,9 @@
     },
     "evm-wallet": {
       "1.0.0": "f19eec515d4b36eeee0712c00df0bf401a72b0d749f4e9b0d4a2ddead4fad93e"
+    },
+    "issue-proposer": {
+      "1.0.1": "84e7484995b4901b06427e810a910a64180bb6e0ba7977f25b0599c5f6b49848"
     }
   }
 }

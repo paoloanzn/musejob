@@ -1,5 +1,18 @@
 {
-  "evm-wallet": { "version": "1.0.0", "public": true },
-  "codemarkets-jobs": { "version": "1.1.0", "public": true },
-  "codemarkets-master": { "version": "1.0.0", "public": false }
+  "evm-wallet": {
+    "version": "1.0.0",
+    "public": true
+  },
+  "codemarkets-jobs": {
+    "version": "1.1.0",
+    "public": true
+  },
+  "codemarkets-master": {
+    "version": "1.0.0",
+    "public": false
+  },
+  "issue-proposer": {
+    "version": "1.0.1",
+    "public": true
+  }
 }
