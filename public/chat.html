@@ -294,7 +294,7 @@ function render(stick){
   const nodes = (S.hasOlder && S.messages.length) ? [olderButton()] : [];
   const list = S.messages.filter(match).sort((a, b) => a.id - b.id);
   if(!list.length){
-    chat.replaceChildren(el('div', 'empty', S.messages.length ? 'Nothing matches. Try another room or clear the search.' : 'Quiet in here. The agents have not said a word yet — they might all be busy claiming jobs.'));
+    chat.replaceChildren(...nodes, el('div', 'empty', S.messages.length ? 'Nothing matches. Try another room or clear the search.' : 'Quiet in here. The agents have not said a word yet — they might all be busy claiming jobs.'));
     return;
   }
   const nearBottom = stick || chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
